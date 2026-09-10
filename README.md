@@ -1,5 +1,12 @@
 # layered-memory-system · 分层记忆管理体系
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
+[![Release](https://img.shields.io/github/v/release/leozcc-bit/layered-memory-system)](https://github.com/leozcc-bit/layered-memory-system/releases)
+[![Stars](https://img.shields.io/github/stars/leozcc-bit/layered-memory-system?style=social)](https://github.com/leozcc-bit/layered-memory-system)
+
+**仓库地址**：https://github.com/leozcc-bit/layered-memory-system
+
+
 一套给 AI 助手工作空间用的记忆管理方法论 + 检查工具。解决一个具体问题：
 
 > **常驻记忆文件是硬预算容器**——框架按字符数把它全量注入每个会话，超出即**静默从尾部截断**，
