@@ -24,7 +24,7 @@ v1.1 新增（多窗口并发写防护）：
 用法：
   python memory_health_check.py --base .workbuddy/memory            # 全量巡检
   python memory_health_check.py --base <dir> --index <index.md>     # 启用 G2 反向映射
-  python memory_health_check.py --base <dir> --expect RULE=3.18 STATUS=1.6 DATA=1.45
+  python memory_health_check.py --base <dir> --expect RULE=<ver> STATUS=<ver> DATA=<ver>
                                                                     # 写前 CAS 校验
   python memory_health_check.py --poison                            # 毒丸自检
 退出码：0 = 无 FAIL（毒丸模式 = 全部捕获；CAS 模式 = 全部匹配）；1 = 有 FAIL / 有毒丸未捕获 / 版本不符
@@ -595,7 +595,7 @@ CAS_KEYS = {
 
 def cas_precheck(base, expects):
     """写公共文件前的 CAS 校验：磁盘签名版本 == 会话预期版本才放行。
-    用法：--expect RULE=3.18 STATUS=1.6 DATA=1.45 SKILL=1.0（键可小写）。"""
+    用法：--expect RULE=<ver> STATUS=<ver> DATA=<ver> SKILL=1.0（键可小写）。"""
     print('=' * 66)
     print('CAS 写前校验  (base=%s)' % base)
     print('=' * 66)
@@ -632,7 +632,7 @@ def main():
     ap.add_argument('--base', default='.workbuddy/memory', help='记忆目录')
     ap.add_argument('--index', default=None, help='工作线索引文件（启用 G2 反向映射）')
     ap.add_argument('--expect', nargs='*', default=None,
-                    help='CAS 写前校验，如 --expect RULE=3.18 STATUS=1.6 DATA=1.45')
+                    help='CAS 写前校验，如 --expect RULE=<ver> STATUS=<ver> DATA=<ver>')
     ap.add_argument('--poison', action='store_true', help='毒丸自检（内存变异）')
     args = ap.parse_args()
 

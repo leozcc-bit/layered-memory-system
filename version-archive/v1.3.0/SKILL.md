@@ -64,7 +64,7 @@ version: 1.3.0
 - **约定**：公共文件（规则/状态/数据层）的核销只在**单一主窗口**做；并行窗口只写本工作线
   的细节层与日志，公共改动记入待同步区由主窗口统一收口。
 - **机械兜底**（不靠自觉）：写公共文件前跑 CAS 校验——
-  `python scripts/memory_health_check.py --base <dir> --expect RULE=3.18 STATUS=1.6 DATA=1.45 SKILL=1.0`，
+  `python scripts/memory_health_check.py --base <dir> --expect RULE=<ver> STATUS=<ver> DATA=<ver> SKILL=1.0`，
   磁盘签名 ≠ 预期即退出码 1，**停止写入，全量重读、基于最新版重放改动**；
   巡检 I 组反查"磁盘版本 < history/ 快照最大版本"，回退已发生时报警并提示从快照恢复。
 - **工作索引也是公共文件**（v1.2 教训）：项目级索引/路由 skill（如 `skills/*/SKILL.md`）
@@ -200,7 +200,7 @@ version: 1.3.0
 python scripts/memory_health_check.py --base .workbuddy/memory    # 全量巡检
 python scripts/memory_health_check.py --poison                    # 毒丸自检
 python scripts/memory_health_check.py --base <dir> --index <索引文件路径>  # 启用 G2 反向映射
-python scripts/memory_health_check.py --base <dir> --expect RULE=3.18 STATUS=1.6 DATA=1.45
+python scripts/memory_health_check.py --base <dir> --expect RULE=<ver> STATUS=<ver> DATA=<ver>
                                                                   # 写前 CAS 校验
 # 退出码：0 = 无 FAIL；1 = 有 FAIL / 毒丸未捕获 / CAS 版本冲突
 ```
