@@ -8,11 +8,11 @@ description: >-
   must separate real defects from bugs in the checker itself; or when a checker has
   been green for so long you suspect it is not actually checking anything. Covers
   7 classes of injectable defects, a runnable Python skeleton, and the three
-  judgement rules that make a poison test trustworthy (SKIP vs miss must be told apart
-  yet both fail the run, measure-then-assert anchors, and verifying the poison itself).
+  judgement rules that make a poison test trustworthy (SKIP vs miss, measure-then-assert
+  anchors, and verifying the poison itself).
 agent_created: true
 author: 敏哥与小B
-version: 1.1.0
+version: 1.0.0
 ---
 
 # 毒丸自检：证明检查脚本不是橡皮图章
@@ -42,8 +42,7 @@ version: 1.1.0
 1. **每个检查组配至少一个毒丸**。有 N 个检查组，就要有 N 个毒丸，一一对应。
 2. **毒丸 = 往被检内容的副本注入一处已知假失效**，只改内存不写磁盘。
 3. **注入后重跑检查，该组必须报错**。报错 = 捕获；不报错 = 这个检查组失效。
-4. **必须全部捕获**（判定就是 `caught == total`）。跳过与漏网都不算通过——有一条没捕获，
-   就别给它盖章，回去查那个组。
+4. **捕获率必须 100%**。有一条没捕获，检查脚本就不能算可信，回去查那个组。
 
 ## 七类可注入的假失效
 
@@ -64,7 +63,7 @@ version: 1.1.0
 
 ## 必须分清的判据
 
-### 1. SKIP（锚点失效）与漏网要分开归因，但**都不算通过**
+### 1. SKIP（锚点失效）≠ 漏网
 
 毒丸靠"替换某段文本"来注入。如果那段文本在被检物里根本不存在，替换不生效，毒丸没注进去，
 检查组自然不报错——这不是检查组失效，是**毒丸自己失效了**。
@@ -74,19 +73,11 @@ poisoned = mutate(text)
 if poisoned == text:
     print('[SKIP] 毒丸未注入 —— 锚点文本不存在，毒丸本身失效，须修毒丸')
     skipped += 1
-    continue          # 计入"未通过"，但要与漏网分开归因
+    continue          # 不计入捕获率的分母
 ```
 
-**分开归因是为了定位病因，不是为了宽容。** 漏网说明检查组有洞；SKIP 说明锚点与被检文本失配
-（夹具改了、代码动了）——两种都要修，都意味着这条分支从来没被验证过。
-
-首版实现把 SKIP 排除出分母，代价是：一批分支没验，脚本照样打印"捕获率 100%"并返回 0
-（那个现象出在配套的记忆巡检器上，它那批毒丸里有 15 颗会因锚点失配而 SKIP）。那是给没验过的
-检查器盖章。判定写成一行就够：
-
-```python
-trusted = (caught == total)      # 跳过与未命中都不在 caught 里，自然不算通过
-```
+把 SKIP 算成"未捕获"，会得出"检查器不可信"的错误结论，然后去改一个本来正确的检查组——
+**这就是误报**。首版实现踩过这个坑。
 
 ### 2. 锚点必须实测，不能照抄文档
 
@@ -129,9 +120,8 @@ assert int(m.group(1)) >= 1   # 单调不回退，只卡下限
 
 > 这个文件里，还有几个地方是在做同一件事？
 
-配套一处同步改：**毒丸锚点也不能含易变值**。锚点写死 `SIGN-END v1.43`，被检物一升版锚点就
-失效，毒丸变 SKIP——在"全部捕获才算通过"的口径下，这个自检**直接失败**，而不是"少验一条但照样
-通过"。用正则定位（`\d+\.\d+`），锚点只留稳定前缀。
+配套一处同步改：**毒丸锚点也不能含易变值**。锚点写死 `SIGN-END v1.43`，被检物升版后锚点失效，
+毒丸变 SKIP，自检从 7/7 掉到 6/6。用正则定位（`\d+\.\d+`），锚点只留稳定前缀。
 
 ## 可运行骨架
 
@@ -153,7 +143,7 @@ def poison_test():
     for title, key, mutate, expect in POISONS:
         poisoned = mutate(base[key])
         if poisoned == base[key]:
-            skipped += 1               # 毒丸自身失效：与漏网分开归因，但同样算不通过
+            skipped += 1               # 毒丸自身失效，不入分母
             print('[SKIP] %s —— 锚点未命中，须修毒丸' % title)
             continue
         F = dict(base); F[key] = poisoned
@@ -163,9 +153,8 @@ def poison_test():
         print('[%s] %s → 期望触发 %s%s'
               % ('OK' if hit else 'FAIL', title, expect,
                  '' if hit else '  ⚠️ 未触发'))
-    print('捕获 %d/%d，跳过 %d，未命中 %d'
-          % (caught, len(POISONS), skipped, len(POISONS) - caught - skipped))
-    return caught == len(POISONS)      # 跳过与未命中都不算通过
+    print('捕获 %d/%d，跳过 %d' % (caught, len(POISONS), skipped))
+    return caught == len(POISONS) - skipped
 ```
 
 ## 实战：用它来区分"真问题"和"脚本自己的病"
@@ -192,8 +181,8 @@ def poison_test():
 交付一个检查脚本前，逐条过：
 
 - [ ] 每个检查组都有对应的毒丸
-- [ ] 毒丸注入后，对应检查组确实报错（**全部捕获**才算通过，判定 `caught == total`）
-- [ ] SKIP 与漏网分开归因，两者都判不通过，且 SKIP 必须显式报告
+- [ ] 毒丸注入后，对应检查组确实报错（捕获率 100%）
+- [ ] SKIP 与漏网分开统计，SKIP 必须显式报告
 - [ ] 所有锚点都从被检文件实测取得，逐处打印核对过
 - [ ] 检查模式与注入模式都不含文档格式化产物（加粗、反引号）
 - [ ] 自述区 / 历史陈述区已排除或已确认无干扰

@@ -14,7 +14,7 @@
 
 设计要点（改动时别破坏）：
     - 毒丸只改内存，绝不写磁盘
-    - SKIP（锚点失效）与漏网分开归因，但两者都算不通过（caught == total 才通过）
+    - SKIP（锚点失效）与漏网分开统计，SKIP 不入捕获率分母
     - 期望值只锁结构不锁具体值（见 check_c）
 """
 import re
@@ -121,11 +121,9 @@ POISONS = [
      lambda s: s.replace('（引用 notes/b.md）', '（引用 notes/不存在.md）', 1), 'B1'),
     ('签名格式破坏', 'MEMORY.md',
      lambda s: s.replace('SIGN-END v1.0 2026-01-01', 'SIGN-END 版本一 二〇二六', 1), 'C1'),
-    # 想看 SKIP 分支长什么样时，放开下面这一条：它用不存在的锚点，会走进 SKIP 分支。
-    # 注意——在"全部捕获才算通过"的口径下，放开后自检会判不通过，这正是要你看见的结果：
-    # 锚点失效 = 这条分支没被验证过，不是"少验一条但照样通过"。
-    # ('锚点故意写错（演示 SKIP）', 'MEMORY.md',
-    #  lambda s: s.replace('- 这个锚点不存在：', '- 状态：毒丸\n', 1), 'A1'),
+    # 这条故意用不存在的锚点，用来演示 SKIP 判据（不计入分母）
+    ('锚点故意写错（演示 SKIP）', 'MEMORY.md',
+     lambda s: s.replace('- 这个锚点不存在：', '- 状态：毒丸\n', 1), 'A1'),
 ]
 
 
@@ -138,7 +136,7 @@ def poison_test():
     for title, key, mutate, expect in POISONS:
         poisoned = mutate(base[key])
         if poisoned == base[key]:
-            # 锚点没命中 = 毒丸自身失效，不是检查组失效——但同样算"没验过"
+            # 锚点没命中 = 毒丸自身失效，不是检查组失效
             print('  [SKIP] %-30s → 毒丸未注入（锚点文本不存在，须修毒丸）' % title)
             skipped += 1
             continue
@@ -150,11 +148,10 @@ def poison_test():
         print('  [%s] %-30s → 期望触发 %s，实测 FAIL %d 条%s'
               % ('OK' if hit else 'FAIL', title, expect, len(bad),
                  '' if hit else '  ⚠️ 未触发！'))
-    total = len(POISONS)          # 跳过也计入分母：它意味着这条分支没被验证过
+    total = len(POISONS) - skipped
     print('  ---')
     print('  捕获 %d/%d（跳过 %d：锚点失效，须修毒丸）' % (caught, total, skipped))
-    print('  判定: %s' % ('毒丸自检通过，检查器有效' if caught == total
-                       else '未全部捕获，检查器不可信（跳过与漏网都不算通过，逐一归因）'))
+    print('  判定: %s' % ('毒丸自检通过，检查器有效' if caught == total else '存在未触发项，检查器不可信'))
     return caught == total
 
 

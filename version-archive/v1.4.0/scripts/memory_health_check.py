@@ -1,16 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-分层记忆管理体系 · 健康巡检器 v1.4
-
-v1.4 修复（随体系 v1.5.0）：
-  - 工作索引改为一键一源：`--index` > 配置区 `F_INDEX_REL` > 记忆目录下的同名文件，
-    统一落在 `files['SKILL.md']`。此前 `--index` 只喂 G2、A/C/I 组另走 `F_INDEX_REL`，
-    只配一处的人以为已生效，实际那几组从未运行；且 `load_ctx` 预先给该键占位，会遮蔽
-    记忆目录里真实存在的同名文件——文件在磁盘上，报告却写"不存在"；
-  - 毒丸可信判定改为"全部捕获"：跳过与未命中一律判不可信。此前跳过不计入分母，
-    15 颗锚点失配时仍报"已配毒丸的分支全部捕获"并 exit 0，等于给没验过的分支盖章；
-  - D 组命名 OK 文案不再替 I 组下结论（三段式在两组口径里本就不一致）。
+分层记忆管理体系 · 健康巡检器 v1.3
 
 v1.3 新增（快照命名合规检测，随体系 v1.4.0）：
   - D 组 快照命名合规：history/ 下不匹配 SNAP_VER_RE 的快照文件名报 WARN——此前这类
@@ -38,13 +29,11 @@ v1.1 新增（多窗口并发写防护）：
 
 用法：
   python memory_health_check.py --base .workbuddy/memory            # 全量巡检
-  python memory_health_check.py --base <dir> --index <index.md>     # 指定工作索引
-                                                                    #（A/C/I 组 + G2 共用）
+  python memory_health_check.py --base <dir> --index <index.md>     # 启用 G2 反向映射
   python memory_health_check.py --base <dir> --expect RULE=<ver> STATUS=<ver> DATA=<ver>
                                                                     # 写前 CAS 校验
   python memory_health_check.py --poison                            # 毒丸自检
-退出码：0 = 无 FAIL（毒丸模式 = 全部捕获；CAS 模式 = 全部匹配）；
-        1 = 有 FAIL / 毒丸未全部捕获（跳过或未命中都算）/ CAS 版本不符
+退出码：0 = 无 FAIL（毒丸模式 = 全部捕获；CAS 模式 = 全部匹配）；1 = 有 FAIL / 有毒丸未捕获 / 版本不符
 """
 import argparse
 import datetime
@@ -59,12 +48,8 @@ F_RULE = 'MEMORY.md'
 F_STATUS = 'STATUS.md'
 F_DATA = 'DATA.md'
 F_HISTORY = 'history'
-# 工作索引（项目级 skill）的文件基名。三条来源按优先级取：命令行 `--index` > 本行
-# `F_INDEX_REL`（相对 base 的路径）> base 目录下的同名文件。三者皆无时 SKILL 相关检测
-# 全部静默跳过，其他项目无此结构零影响（误报比漏报更坏，同 C 组哲学）。
-# ⚠️ 默认值 `../skills/<your-index>/SKILL.md` 是占位符，且 `<` `>` 在 Windows 上是非法
-# 路径字符，必须换成你的真实目录名——不换，A/C/I 三组会一律静默跳过，报告看起来全绿。
-# 显式给出的 `--index` 读不到时会报 WARN（不能与"从没配过"同档）；配置区读不到才是静默的。
+# 工作索引（项目级 skill）：相对 base 的路径；文件不存在时 SKILL 相关检测全部静默跳过，
+# 其他项目无此结构零影响（误报比漏报更坏，同 C 组哲学）
 F_INDEX = 'SKILL.md'
 F_INDEX_REL = '../skills/<your-index>/SKILL.md'
 
@@ -99,14 +84,12 @@ def _ver(s):
 class Ctx(object):
     """检查输入的载体。真实跑 = 从磁盘收集；毒丸跑 = 手工构造/变异。"""
 
-    def __init__(self, files=None, snapshots=None, logs=None, today=None,
-                 index_tried=None, index_note=''):
-        self.files = files or {}          # {文件名: 内容 or None}；工作索引也在 F_INDEX 键上
+    def __init__(self, files=None, snapshots=None, logs=None, index=None, today=None):
+        self.files = files or {}          # {文件名: 内容 or None}
         self.snapshots = snapshots or []  # [(文件名, 字节数), ...]
         self.logs = logs or []            # ['YYYY-MM-DD', ...] 已排序
+        self.index = index                # 索引文件内容（可选，G2 用）
         self.today = today or datetime.date.today()
-        self.index_tried = index_tried or []   # 索引解析时尝试过的 (来源, 路径)
-        self.index_note = index_note           # 显式 --index 不可达时的提醒（空 = 无异常）
 
 
 def read(p):
@@ -115,27 +98,6 @@ def read(p):
             return f.read()
     except Exception:
         return None
-
-
-def resolve_index(base, index_path=None):
-    """工作索引正文：逐级级联解析，返回 (内容, 命中来源, 尝试过的 (来源, 路径) 清单)。
-
-    优先级：显式 --index > 配置区 F_INDEX_REL > 记忆目录下的同名文件。
-    旧实现是两条互不相交的读取路径：A/C/I 组只读配置区 F_INDEX_REL，G2 只看 --index；
-    记忆目录下的同名文件则因 F_INDEX 被预占位而从未被读取。后果是"配了一处就以为生效"，
-    以及"文件就在磁盘上，报告却说不存在"。这里改成逐个试到底，并把试过的路径交回调用方，
-    好让报告说清"到底找过哪些地方"。A/C/I 组、G2 反向映射与 CAS 的 SKILL 通道共用它。
-    """
-    cands = []
-    if index_path:
-        cands.append(('--index', index_path))
-    cands.append(('F_INDEX_REL', os.path.normpath(os.path.join(base, F_INDEX_REL))))
-    cands.append((F_INDEX, os.path.join(base, F_INDEX)))
-    for src, path in cands:
-        c = read(path)
-        if c is not None:
-            return c, src, cands
-    return None, None, cands
 
 
 # ---------------------------------------------------------------- A 版本号一致性
@@ -182,19 +144,8 @@ def check_versions(ctx):
 
     idx = ctx.files.get(F_INDEX)
     if idx is None:
-        tried = '；'.join('%s→%s' % (a, b) for a, b in ctx.index_tried)
-        msg = '%s 未读到，SKILL 签名检测跳过' % F_INDEX
-        if tried:
-            msg += '（已找过：%s）' % tried
-        elif F_INDEX_REL:
-            msg += '（查找 %s 与记忆目录下的同名文件）' % F_INDEX_REL
-        # 显式给了 --index 却读不到，不能与"从没配过"同档为 OK：那是配置错误，不是没有需求。
-        # tried 已把尝试过的路径列全，不再复述 index_note，避免同一句话印两遍。
-        # 显式给了 --index 却读不到，不能与"从没配过"同档为 OK：那是配置错误，不是没有需求
-        out.append(('WARN' if ctx.index_note else 'OK', 'A', msg))
+        out.append(('OK', 'A', '%s 不存在，SKILL 签名检测跳过' % F_INDEX))
     else:
-        if ctx.index_note:
-            out.append(('WARN', 'A', '%s：%s' % (F_INDEX, ctx.index_note)))
         head = [l for l in idx.split('\n')[:12] if l.startswith(SIG['INDEX'])]
         if not head:
             out.append(('FAIL', 'A', '%s 前 12 行未找到 %s 签名（头部纪律，同 %s）'
@@ -279,7 +230,7 @@ def check_refs_same(ctx):
 
 
 def check_refs_cross(ctx):
-    """跨文件「」标题引用：目标 = 主三件 + 工作索引 + notes/ 下各文件的文件名（去扩展名）。
+    """跨文件「」标题引用：目标 = 主三件 + notes/ 下各文件的文件名（去扩展名）。
     只在源文件里点名了目标名时才检查——没点名的不猜。"""
     out = []
     targets = {}
@@ -357,10 +308,7 @@ def check_snapshots(ctx):
         out.append(('WARN', 'D', '快照主体名与签名主体不同名 %s —— I 组不拿它比对'
                     '（应为 %s 之一）' % (offsubject, '/'.join(sorted(SNAP_SUBJECTS)))))
     elif matched:
-        # 只讲 D 组能判的三项，不替 I 组下结论：I 组另按正则匹配过滤，"这三项合规"与
-        # "I 组实际参与比对"不是同一个集合（三段式两者不一致）。也不能说"完全合规"——
-        # 硬要求第三条（版本 = 被快照文件当前版本）不在任何机械检查内，见 SKILL.md。
-        out.append(('OK', 'D', '快照命名 %d 个合规（格式 + 版本位次 + 主体名）' % len(matched)))
+        out.append(('OK', 'D', '快照命名 %d 个格式合规，可参与 I 组比对' % len(matched)))
     return out
 
 
@@ -409,8 +357,7 @@ def check_status_health(ctx):
         out.append(('OK', 'G', '状态层热层 %d 条（≤10）' % n_hot))
 
     # G2 反向映射：索引文件的非终态工作线必须登记在状态层（同款漏登记真实发作过）
-    # 工作索引统一读 files[F_INDEX]——与 A/C/I 组同源，避免"配了一处、另一组从未运行"
-    idx = ctx.files.get(F_INDEX)
+    idx = ctx.index
     if idx and '## 工作清单' in idx:
         seg = idx.split('## 工作清单')[1].split('\n## ')[0]
         rows = re.findall(r'^\|\s*(\d+)\s*\|\s*(.+?)\s*\|\s*(.+?)\s*\|\s*(.+?)\s*\|', seg, re.M)
@@ -560,9 +507,8 @@ def load_ctx(base, index_path=None):
     files = {}
     for fn in (F_RULE, F_STATUS, F_DATA):
         files[fn] = read(os.path.join(base, fn))
-    # base 下的其余 .md 一并读入。**不要在这里给 F_INDEX 预占位**：预占位会让下面
-    # `fn not in files` 判定为"已存在"，把 base 目录里真实存在的同名文件挡在门外——
-    # 文件就在磁盘上，报告却写"不存在"。踩过的坑：本地放 SKILL.md 时签名检测永久休眠。
+    # 工作索引 SKILL.md（不在 base 下，相对路径可达才读；读不到保持 None → 相关检测跳过）
+    files[F_INDEX] = read(os.path.normpath(os.path.join(base, F_INDEX_REL)))
     if os.path.isdir(base):
         for fn in sorted(os.listdir(base)):
             if fn.endswith('.md') and not DATE_RE.fullmatch(fn) and fn not in files:
@@ -584,21 +530,8 @@ def load_ctx(base, index_path=None):
     logs = sorted(fn[:-3] for fn in os.listdir(base)
                   if DATE_RE.fullmatch(fn)) if os.path.isdir(base) else []
 
-    # 工作索引：--index > 配置区 F_INDEX_REL > base 下的同名文件，逐级级联（见 resolve_index）。
-    # 三条来源统一落在 files[F_INDEX] 一个键上——A/C/I 组、G2 反向映射与 CAS 的 SKILL 通道
-    # 读的是同一份。早先 --index 只喂 G2、A/C/I 组另走 F_INDEX_REL：只配一处的人以为已生效，
-    # 实际那几组从未运行，报告还全绿。
-    idx, idx_src, idx_tried = resolve_index(base, index_path)
-    if idx is not None:
-        files[F_INDEX] = idx
-    note = ''
-    if index_path and idx_src != '--index':
-        label = {'F_INDEX_REL': '配置区 F_INDEX_REL 指向的文件',
-                 F_INDEX: '记忆目录下的同名文件'}.get(idx_src, idx_src)
-        note = ('--index 指向的文件读不到，已回落到%s' % label) if label \
-               else '--index 指向的文件读不到，配置区与记忆目录下的同名文件也不可达'
-    return Ctx(files=files, snapshots=snapshots, logs=logs,
-               index_tried=idx_tried, index_note=note)
+    index = read(index_path) if index_path else None
+    return Ctx(files=files, snapshots=snapshots, logs=logs, index=index)
 
 
 # ---------------------------------------------------------------- 毒丸模式
@@ -625,7 +558,7 @@ def green_fixture():
                  ('DATA_v0.1_基线快照.md', 100),
                  ('SKILL_v0.1_基线快照.md', 100)]
     logs = [today.isoformat()]
-    return Ctx(files=files, snapshots=snapshots, logs=logs, today=today)
+    return Ctx(files=files, snapshots=snapshots, logs=logs, index=skill, today=today)
 
 
 POISONS = [
@@ -648,7 +581,6 @@ POISONS = [
     ('无任何快照', None, None, 'D'),        # 变异走快照清单
     ('无日志文件', None, None, 'F'),        # 变异走日志清单
     ('核心文件读取失败', None, None, 'A'),   # 变异走文件表
-    ('索引未读到（--index 不可达）', None, None, 'A'),  # 变异走 Ctx.index_note
     ('STATUS 读取失败', None, None, 'A'),    # 同上
     ('跨文件目标文件不存在', None, None, 'C'),  # 同上 + 引用注入
     ('状态层缺失', None, None, 'G'),         # 同上
@@ -710,10 +642,7 @@ def poison_test():
                 ctx.logs = ([] if '无日志' in title
                             else [(ctx.today - datetime.timedelta(days=30)).isoformat()])
             elif expect == 'A':
-                if '索引未读到' in title:
-                    ctx.files[F_INDEX] = None
-                    ctx.index_note = '--index 指向的文件读不到（毒丸注入）'
-                elif 'STATUS' in title:
+                if 'STATUS' in title:
                     ctx.files[F_STATUS] = None
                 else:
                     ctx.files[F_RULE] = None
@@ -724,7 +653,7 @@ def poison_test():
                     '示例事实条目', '示例事实条目（见 SKILL「工作清单」）', 1)
             elif expect == 'G':
                 if 'G2' in title:
-                    ctx.files[F_INDEX] = ctx.files[F_INDEX].replace('示例工作线', '另一条线')
+                    ctx.index = ctx.index.replace('示例工作线', '另一条线')
                 else:
                     ctx.files[F_STATUS] = None
             elif expect == 'I':
@@ -755,18 +684,16 @@ def poison_test():
             print('  [FAIL] %s → 期望组 %s 未报错%s'
                   % (title, expect,
                      ('，但其他组报了: %s' % [(r[1], r[2][:40]) for r in others]) if others else '，全绿'))
-    missed = total - caught - skipped
-    print('\n捕获 %d/%d，跳过 %d，未命中 %d' % (caught, total, skipped, missed))
-    # 只有"全部捕获"才算可信。把 SKIP 排除出分母，会把"夹具被改过、这批毒丸已经导盲"
-    # 洗成绿灯：实测 15 颗锚点失效时，仍报"已配毒丸的分支全部捕获（16/16）"并返回 0 —
-    # 那 15 条分支一条都没验，检查器却给自己盖了章。跳过与未命中都意味着该分支没被验证，
-    # 都该挡住；跳过通常说明毒丸锚点与被检文本失配（夹具改了），先修毒丸再谈检查器。
-    trusted = (caught == total)
-    if trusted:
-        print('结论: 检查器可信（%d 颗毒丸全部捕获）' % total)
+    print('\n捕获 %d/%d，跳过 %d（跳过=毒丸锚点未命中，不计入分母）' % (caught, total, skipped))
+    # 捕获率 100% 的定义：全部毒丸都有着落，未 SKIP 的全部被捕获
+    # caught > 0 是必要的下限：全 SKIP 时前两式恒等，会判"可信"并 exit 0 —— 与
+    # "跳过不算覆盖"自相矛盾，等于给一台没验过任何分支的检查器盖章。
+    trusted = (caught + skipped == total) and (caught == total - skipped) and caught > 0
+    if trusted and skipped:
+        print('结论: 已配毒丸的分支全部捕获（%d/%d），另有 %d 颗毒丸跳过（锚点未命中）'
+              % (caught, total - skipped, skipped))
     else:
-        print('结论: 不可信（捕获 %d/%d，跳过 %d，未命中 %d）—— 跳过或未命中即未验证。'
-              % (caught, total, skipped, missed))
+        print('结论: %s' % ('检查器可信（已配毒丸的分支捕获率 100%）' if trusted else '不可信'))
     return 0 if trusted else 1
 
 
@@ -775,18 +702,15 @@ CAS_KEYS = {
     'RULE': (F_RULE, SIG['RULE']),
     'STATUS': (F_STATUS, SIG['STATUS']),
     'DATA': (F_DATA, SIG['DATA']),
-    # SKILL 的路径运行时解析（与巡检同源，见 resolve_index）。这里早先写死 F_INDEX_REL，
-    # 而 CAS_KEYS 是模块级字面量、import 时即冻结 —— 结果是 --index 在 CAS 模式被整体忽略：
-    # 用户按文档"只配一处"配好索引后，普通巡检全绿，CAS 却永远判冲突、阻断写入。
-    'SKILL': (None, SIG['INDEX']),
+    'SKILL': (F_INDEX_REL, SIG['INDEX']),
 }
 
 
-def cas_precheck(base, expects, index_path=None):
+def cas_precheck(base, expects):
     """写公共文件前的 CAS 校验：磁盘签名版本 == 会话预期版本才放行。
     用法：--expect RULE=<ver> STATUS=<ver> DATA=<ver>（键可小写）。项目里另有工作索引时
-    才追加 SKILL=<ver>。SKILL 与其他检查同源解析（--index > 配置区 > 记忆目录同名文件）；
-    解析不到时本校验直接判冲突，而普通巡检对读不到的文件是静默跳过的。"""
+    才追加 SKILL=<ver>——索引路径读不到时本校验直接判冲突，而普通巡检对读不到的文件是
+    静默跳过的。"""
     print('=' * 66)
     print('CAS 写前校验  (base=%s)' % base)
     print('=' * 66)
@@ -800,33 +724,20 @@ def cas_precheck(base, expects, index_path=None):
             bad += 1
             continue
         fname, sig = CAS_KEYS[k]
-        fallback = ''
-        if fname is None:
-            text, src, cands = resolve_index(base, index_path)
-            where = 'SKILL.md'
-            hint = '（已找过：%s）' % '；'.join('%s→%s' % (a, b) for a, b in cands)
-            # 与巡检同源，提示也得同源：显式 --index 读不到却静默用回落源，等于给用户一个
-            # "我配的索引被校验过了"的假保证 —— 这正是本体系最反对的东西。
-            if index_path and src and src != '--index':
-                fallback = '；注意 --index 指向的文件读不到，本次校验用的是 %s' % src
-        else:
-            text = read(os.path.join(base, fname))
-            where = fname
-            hint = '（文件不存在？）'
+        text = read(os.path.join(base, fname))
         got = re.findall(r'^%s v(\d+\.\d+)' % re.escape(sig), text or '', re.M)
-        if text is None:
-            print('  [FAIL] %s 读取失败%s' % (where, hint))
+        if not text:
+            print('  [FAIL] %s 读取失败（文件不存在？）' % fname)
             bad += 1
         elif not got:
-            # 与 A 组同口径：读到内容但提不出签名，说"未读到签名"，不说"读取失败"
-            print('  [FAIL] %s 未读到签名 %s（无法校验，视为冲突）%s' % (where, sig, fallback))
+            print('  [FAIL] %s 未找到签名 %s（无法校验，视为冲突）' % (fname, sig))
             bad += 1
         elif want not in got:
             print('  [FAIL] %s 版本冲突：磁盘=%s，会话预期=v%s —— 另一会话已写入，'
-                  '全量重读基于最新版重放改动%s' % (where, '/'.join(sorted(set(got))), want, fallback))
+                  '全量重读基于最新版重放改动' % (fname, '/'.join(sorted(set(got))), want))
             bad += 1
         else:
-            print('  [PASS] %s = v%s（与预期一致，可写）%s' % (where, want, fallback))
+            print('  [PASS] %s = v%s（与预期一致，可写）' % (fname, want))
     print('\n结论: %s' % ('全部匹配，可写' if not bad else '%d 项冲突，停止写入' % bad))
     return 1 if bad else 0
 
@@ -842,8 +753,7 @@ def main():
         pass
     ap = argparse.ArgumentParser(description='分层记忆管理体系 · 健康巡检器')
     ap.add_argument('--base', default='.workbuddy/memory', help='记忆目录')
-    ap.add_argument('--index', default=None,
-                    help='工作索引文件路径，覆盖配置区 F_INDEX_REL（A/C/I 组、G2 反向映射、CAS 的 SKILL 通道共用这一份）')
+    ap.add_argument('--index', default=None, help='工作线索引文件（启用 G2 反向映射）')
     ap.add_argument('--expect', nargs='*', default=None,
                     help='CAS 写前校验，如 --expect RULE=<ver> STATUS=<ver> DATA=<ver>')
     ap.add_argument('--poison', action='store_true', help='毒丸自检（内存变异）')
@@ -863,7 +773,7 @@ def main():
             print('[FAIL] --expect 未带任何 RULE=<ver> 参数 —— 拒绝执行'
                   '（空参数会让写前校验静默失效，误当成"校验通过"）')
             return 1
-        return cas_precheck(args.base, args.expect, args.index)
+        return cas_precheck(args.base, args.expect)
 
     print('=' * 66)
     print('记忆体系健康巡检  %s  (base=%s)' % (datetime.date.today(), args.base))
