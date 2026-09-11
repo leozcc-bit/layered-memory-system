@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-分层记忆管理体系 · 健康巡检器 v1.2
+分层记忆管理体系 · 健康巡检器 v1.3
 
-v1.2 新增（ID 撞号检测，09-05）：
+v1.3 新增（快照命名合规检测，随体系 v1.4.0）：
+  - D 组 快照命名合规：history/ 下不匹配 SNAP_VER_RE 的快照文件名报 WARN——此前这类
+    文件被 I 组静默 continue，命名写错等于检测失效且无人提示；
+  - D 组 三段式版本提醒：vX.Y.Z 能被 SNAP_VER_RE 匹配，但第三段在比对中丢失，补丁位
+    的回退检测不到，单独提示改用 vX.Y。
+
+v1.2 新增（ID 撞号检测）：
   - J 组 ID 唯一性：数据层条目行（`- [类型][状态] XX-NNN …`）按字母前缀分区查重，
-    同前缀同号即 FAIL——撞号会令「引用带 ID」纪律产生歧义（实例：FACT M-007
-    两条不同内容共号，存活十余轮升版才被全量体检发现）。
+    同前缀同号即 FAIL——撞号会令「引用带 ID」纪律产生歧义（同一 ID 挂两条不同内容，
+    长期未被全量体检发现）。
 
-v1.1 新增（多窗口并发写防护，09-03）：
+v1.1 新增（多窗口并发写防护）：
   - I 组 版本回退检测：磁盘当前签名版本 < history/ 快照最大版本 → 疑似被并行会话
     整文件覆盖，报警并提示从快照恢复；
   - --expect CAS 写前校验：写公共文件前校验磁盘签名版本 = 会话预期版本，
@@ -24,7 +30,7 @@ v1.1 新增（多窗口并发写防护，09-03）：
 用法：
   python memory_health_check.py --base .workbuddy/memory            # 全量巡检
   python memory_health_check.py --base <dir> --index <index.md>     # 启用 G2 反向映射
-  python memory_health_check.py --base <dir> --expect RULE=3.18 STATUS=1.6 DATA=1.45
+  python memory_health_check.py --base <dir> --expect RULE=<ver> STATUS=<ver> DATA=<ver>
                                                                     # 写前 CAS 校验
   python memory_health_check.py --poison                            # 毒丸自检
 退出码：0 = 无 FAIL（毒丸模式 = 全部捕获；CAS 模式 = 全部匹配）；1 = 有 FAIL / 有毒丸未捕获 / 版本不符
@@ -64,6 +70,10 @@ DERIVE_KW = ['同步启动', '同步进行', '尚未启动', '未启动', '须�
 TERMINAL_STATUS = {'已完成', '已定稿', '背景', '已完结'}
 # I 组：history/ 快照命名规范 {stem}_vX.Y_说明.md，快照版本必须 ≤ 磁盘当前版本
 SNAP_VER_RE = re.compile(r'^(\w+?)_v(\d+\.\d+)')
+# 三段式 vX.Y.Z 能被 SNAP_VER_RE 匹配，但 I 组只取前两段、补丁位整个丢失 → D 组单独拎出来报
+SNAP_VER3_RE = re.compile(r'^(\w+?)_v(\d+\.\d+)\.\d+')
+# 命名合规检查的豁免名单（自定义命名约定的项目请改上面的 SNAP_VER_RE，不要往这里堆名字）
+SNAP_IGNORE = {'README.md', 'notes.md'}
 
 
 def _ver(s):
@@ -99,7 +109,9 @@ def check_versions(ctx):
         out.append(('FAIL', 'A', '%s / %s 读取失败' % (F_RULE, F_DATA)))
         return out
 
-    vers = set(re.findall(r'^# .*%s v(\d+\.\d+)' % re.escape(F_RULE), m, re.M)) | \
+    # 标题里的版本：`.md` 与 `v` 之间允许夹标题说明（如「# DATA.md 事实登记表 v1.0」）。
+    # 早先要求二者紧邻，导致 DATA 标题版本实际从未被提取——报告却照打"三处一致"。
+    vers = set(re.findall(r'^# .*%s\b.*?v(\d+\.\d+)' % re.escape(F_RULE), m, re.M)) | \
            set(re.findall(r'^%s v(\d+\.\d+)' % SIG['RULE'], m, re.M))
     if len(vers) == 1:
         out.append(('OK', 'A', '%s 版本号唯一: v%s' % (F_RULE, vers.pop())))
@@ -122,7 +134,7 @@ def check_versions(ctx):
             else:
                 out.append(('FAIL', 'A', '%s 签名版本号不唯一: %s' % (F_STATUS, sorted(sv))))
 
-    dv = set(re.findall(r'^# .*%s v(\d+\.\d+)' % re.escape(F_DATA), d, re.M)) | \
+    dv = set(re.findall(r'^# .*%s\b.*?v(\d+\.\d+)' % re.escape(F_DATA), d, re.M)) | \
          set(re.findall(r'^- 版本: v(\d+\.\d+)', d, re.M)) | \
          set(re.findall(r'^%s v(\d+\.\d+)' % SIG['DATA'], d, re.M))
     if len(dv) == 1:
@@ -179,9 +191,17 @@ def collect_anchors(text):
 
 
 def _is_cross_file(line, pos):
-    """引用点前 14 字符内出现别的文档名 → 跨文件引用，不拿本文档锚点比对。"""
-    ctx = line[max(0, pos - 14):pos]
-    return bool(re.search(r'(\.md|MEMORY|STATUS|DATA|notes/)', ctx))
+    """引用点之前若已点名别的文档 → 视为跨文件引用，不拿本文档锚点比对。
+
+    只回看到最近一个**句末**标点为止，且分隔符集不含顿号与逗号。两头都是坑：
+    早先用固定 14 字符窗，一行里出现一次 `.md` 提及就会把该行后续的同文件引用一并放过；
+    改成切窗后又试过把 `、,，` 也算分隔符，结果 `见 DATA.md、§9` 被切成空串，`.md` 判定
+    落空，跨文件引用反倒被误报成本文档悬空——误报比漏报更坏。"""
+    head = line[:pos]
+    cut = max(head.rfind(c) for c in '。；;！？')
+    if cut >= 0:
+        head = head[cut + 1:]
+    return bool(re.search(r'\.md|MEMORY|STATUS|DATA|SKILL|notes/', head))
 
 
 def check_refs_same(ctx):
@@ -214,18 +234,22 @@ def check_refs_cross(ctx):
     只在源文件里点名了目标名时才检查——没点名的不猜。"""
     out = []
     targets = {}
-    for stem in (F_RULE[:-3], F_STATUS[:-3], F_DATA[:-3]):
+    for stem in (F_RULE[:-3], F_STATUS[:-3], F_DATA[:-3], F_INDEX[:-3]):
         targets[stem] = ctx.files.get(stem + '.md')
     for stem, s in ctx.files.items():
         if stem.startswith('notes/') and s:
-            targets[stem.split('/', 1)[1]] = s
+            # 键去扩展名：QUOTE_NAME_RE 的首组不含 `.`，带 `.md` 的键永远匹配不上
+            targets[stem.split('/', 1)[1].rsplit('.', 1)[0]] = s
 
     for name, s in sorted(ctx.files.items()):
         if s is None or DATE_RE.fullmatch(name):
             continue
+        me = name.rsplit('.', 1)[0]
         for m in QUOTE_NAME_RE.finditer(s):
             key, title = m.group(1), m.group(2)
-            if key not in targets:
+            if key not in targets or key == me:
+                # 键不在目标池 = 没点名可查的目标；键等于自身 = 自引用恒真（源文件自己
+                # 就含该标题字串），比对无意义。两种都跳过，不猜。
                 continue
             ts = targets[key]
             if ts is None:
@@ -242,16 +266,49 @@ def check_refs(ctx):
 
 
 # ---------------------------------------------------------------- D 快照
+# I 组实际会拿去比对的主体名（= 签名主体的 stem）；不在其列的快照名格式再对也不进比对
+SNAP_SUBJECTS = {F_RULE.split('.')[0], F_STATUS.split('.')[0],
+                 F_DATA.split('.')[0], F_INDEX.split('.')[0]}
+
+
 def check_snapshots(ctx):
     out = []
-    if not ctx.snapshots:
+    # dotfile（如 .gitkeep）不算快照：空快照判定与命名判定共用这一份口径，避免两处不一致
+    snaps = [(n, s) for n, s in ctx.snapshots
+             if not n.startswith('.') and n not in SNAP_IGNORE]
+    if not snaps:
         out.append(('FAIL', 'D', 'history/ 无任何快照（写前快照机制未生效）'))
         return out
-    empty = [n for n, size in ctx.snapshots if size == 0]
+    empty = [n for n, size in snaps if size == 0]
     if empty:
         out.append(('FAIL', 'D', '存在空快照（回退会失败）: %s' % empty))
     else:
-        out.append(('OK', 'D', '快照 %d 个，无空快照' % len(ctx.snapshots)))
+        out.append(('OK', 'D', '快照 %d 个，无空快照' % len(snaps)))
+
+    # 命名合规：不匹配 SNAP_VER_RE 的快照会被 I 组静默 continue，违反在检测层不可见
+    # → 这里补一条 WARN。只报后果、不阻断（定 FAIL 会把退出码钉死在纯格式问题上）
+    named = [n for n, _s in snaps]
+    unmatched = [n for n in named if not SNAP_VER_RE.match(n)]
+    if unmatched:
+        out.append(('WARN', 'D', '快照命名不合规 %d 个，不参与 I 组版本回退检测: %s'
+                    '（规范 {主体}_vX.Y_说明.md，版本须在第二段）' % (len(unmatched), unmatched)))
+
+    trunc = [n for n in named if SNAP_VER3_RE.match(n)]
+    if trunc:
+        out.append(('WARN', 'D', '快照版本写了三段 %s —— I 组只取前两段，'
+                    '补丁位回退检测不到（请用 vX.Y）' % trunc))
+
+    # 主体名：格式对了还不够——主体名不在签名主体之列，I 组照样不拿它比对
+    # 三段式的排除是必要的：它名字看着合规，但版本被截断，不能算"可参与比对"
+    matched = [n for n in named
+               if SNAP_VER_RE.match(n) and not SNAP_VER3_RE.match(n)]
+    offsubject = [n for n in matched
+                  if SNAP_VER_RE.match(n).group(1).upper() not in SNAP_SUBJECTS]
+    if offsubject:
+        out.append(('WARN', 'D', '快照主体名与签名主体不同名 %s —— I 组不拿它比对'
+                    '（应为 %s 之一）' % (offsubject, '/'.join(sorted(SNAP_SUBJECTS)))))
+    elif matched:
+        out.append(('OK', 'D', '快照命名 %d 个格式合规，可参与 I 组比对' % len(matched)))
     return out
 
 
@@ -299,12 +356,13 @@ def check_status_health(ctx):
     else:
         out.append(('OK', 'G', '状态层热层 %d 条（≤10）' % n_hot))
 
-    # G2 反向映射：索引文件的非终态工作线必须登记在状态层（09-02 同款漏登记真实发作过）
+    # G2 反向映射：索引文件的非终态工作线必须登记在状态层（同款漏登记真实发作过）
     idx = ctx.index
     if idx and '## 工作清单' in idx:
         seg = idx.split('## 工作清单')[1].split('\n## ')[0]
         rows = re.findall(r'^\|\s*(\d+)\s*\|\s*(.+?)\s*\|\s*(.+?)\s*\|\s*(.+?)\s*\|', seg, re.M)
-        alive = [(a, b, c) for a, b, c, d4 in rows if d4.strip() not in TERMINAL_STATUS]
+        # 第 3 列是唤醒词、第 4 列才是状态：判定与打印都必须取 d4，取 c 会在报告里印出唤醒词
+        alive = [(a, b, d4) for a, b, c, d4 in rows if d4.strip() not in TERMINAL_STATUS]
         tracked = s.split('## 已闭环')[0]
         missing = []
         for num, name, st in alive:
@@ -493,22 +551,42 @@ def green_fixture():
             'DATA-END v1.0\n' % (today.isoformat(), today.isoformat()))
     skill = ('---\nname: work-index\n---\n\n# 工作索引\n\nSKILL-END v1.0\n\n'
              '## 工作清单\n\n| 序 | 工作线 | 唤醒词 | 状态 | 续作点 | 产物 |\n'
-             '|---|---|---|---|---|---|\n| 1 | 示例线 | 示例 | 进行中 | 示例下一步 | 示例产物 |\n')
+             '|---|---|---|---|---|---|\n| 1 | 示例工作线 | 示例 | 进行中 | 示例下一步 | 示例产物 |\n')
     files = {F_RULE: memory, F_STATUS: status, F_DATA: data, F_INDEX: skill}
-    snapshots = [('snapshot_v1.md', 120),
+    snapshots = [('STATUS_v0.1_基线快照.md', 120),
                  ('MEMORY_v0.1_基线快照.md', 100),
                  ('DATA_v0.1_基线快照.md', 100),
                  ('SKILL_v0.1_基线快照.md', 100)]
     logs = [today.isoformat()]
-    return Ctx(files=files, snapshots=snapshots, logs=logs, index=None, today=today)
+    return Ctx(files=files, snapshots=snapshots, logs=logs, index=skill, today=today)
 
 
 POISONS = [
     ('版本号不唯一', F_RULE, lambda s: s.replace('MEM-END v1.0', 'MEM-END v0.9', 1), 'A'),
     ('占位符残留', F_RULE, lambda s: s + '\n引用 {MEM_CUR}\n', 'B'),
     ('悬空引用', F_DATA, lambda s: s.replace('示例事实条目', '示例事实条目（见 §9）', 1), 'C'),
+    ('跨文件引用悬空', F_DATA, lambda s: s.replace(
+        '示例事实条目', '示例事实条目（见 MEMORY「不存在的节」）', 1), 'C'),
     ('空快照', None, None, 'D'),      # 变异走快照清单，不走文件内容
+    ('快照命名不合规', None, None, 'D'),   # 同上：塞入不匹配 SNAP_VER_RE 的文件名
+    ('快照版本写三段', None, None, 'D'),   # 同上：塞入 vX.Y.Z，补丁位会被 I 组吞掉
+    ('快照主体名不符', None, None, 'D'),   # 同上：塞入主体名不在签名主体之列的文件名
     ('待同步未核销', F_DATA, lambda s: s.replace('待同步: 0 条', '待同步: 2 条', 1), 'E'),
+    ('待同步字段缺失', F_DATA, lambda s: s.replace('待同步: 0 条', '待处理: 0 条', 1), 'E'),
+    ('STATUS 签名缺失', F_STATUS, lambda s: s.replace('STATUS-END v1.0', '（签名被移除）', 1), 'A'),
+    ('STATUS 签名版本不唯一', F_STATUS,
+     lambda s: s.replace('STATUS-END v1.0', 'STATUS-END v1.0\nSTATUS-END v0.9', 1), 'A'),
+    ('DATA 版本三处不一致', F_DATA, lambda s: s.replace('- 版本: v1.0', '- 版本: v9.9', 1), 'A'),
+    ('热层清空', F_STATUS, lambda s: s.replace('- **示例工作线**', '- 示例工作线', 1), 'G'),
+    ('无任何快照', None, None, 'D'),        # 变异走快照清单
+    ('无日志文件', None, None, 'F'),        # 变异走日志清单
+    ('核心文件读取失败', None, None, 'A'),   # 变异走文件表
+    ('STATUS 读取失败', None, None, 'A'),    # 同上
+    ('跨文件目标文件不存在', None, None, 'C'),  # 同上 + 引用注入
+    ('状态层缺失', None, None, 'G'),         # 同上
+    ('无签名对象', None, None, 'I'),         # 同上
+    ('DATA 读取失败', None, None, 'J'),      # 同上
+    ('G2 反向映射漏登记', None, None, 'G'),  # 变异走索引
     ('日志断档', None, None, 'F'),    # 变异走日志清单
     ('热层超限', F_STATUS, lambda s: s.replace(
         '## 温层', ''.join('- **填充线%02d**［填］最后 2026-01-01\n' % i for i in range(1, 12)) + '\n## 温层', 1), 'G'),
@@ -550,15 +628,44 @@ def poison_test():
         if fname is None:
             # 走非文件通道的变异
             if expect == 'D':
-                ctx.snapshots = [('empty_snapshot.md', 0)]
+                if '命名' in title:
+                    ctx.snapshots = [('MEMORY_20250101_说明.md', 100)]
+                elif '三段' in title:
+                    ctx.snapshots = [('MEMORY_v0.1.0_说明.md', 100)]
+                elif '主体名' in title:
+                    ctx.snapshots = [('MEMORYX_v0.1_说明.md', 100)]
+                elif '无任何快照' in title:
+                    ctx.snapshots = []
+                else:
+                    ctx.snapshots = [('MEMORY_v0.1_空快照.md', 0)]
             elif expect == 'F':
-                ctx.logs = [(ctx.today - datetime.timedelta(days=30)).isoformat()]
+                ctx.logs = ([] if '无日志' in title
+                            else [(ctx.today - datetime.timedelta(days=30)).isoformat()])
+            elif expect == 'A':
+                if 'STATUS' in title:
+                    ctx.files[F_STATUS] = None
+                else:
+                    ctx.files[F_RULE] = None
+            elif expect == 'C':
+                # 让 targets['SKILL'] 落空，同时让 DATA 点名引用它 → 走"目标文件不存在"分支
+                ctx.files[F_INDEX] = None
+                ctx.files[F_DATA] = ctx.files[F_DATA].replace(
+                    '示例事实条目', '示例事实条目（见 SKILL「工作清单」）', 1)
+            elif expect == 'G':
+                if 'G2' in title:
+                    ctx.index = ctx.index.replace('示例工作线', '另一条线')
+                else:
+                    ctx.files[F_STATUS] = None
             elif expect == 'I':
                 # 磁盘 v1.0，快照里出现 v9.9 → 回退告警；SKILL 版毒丸单测 SKILL 回退通道
-                if 'SKILL' in title:
+                if '无签名对象' in title:
+                    ctx.files = {}          # 所有文件都提不到签名版本 → I 组无对象
+                elif 'SKILL' in title:
                     ctx.snapshots = ctx.snapshots + [('SKILL_v9.9_覆盖嫌疑.md', 100)]
                 else:
                     ctx.snapshots = ctx.snapshots + [('MEMORY_v9.9_覆盖嫌疑.md', 100)]
+            elif expect == 'J':
+                ctx.files[F_DATA] = None
         else:
             src = ctx.files[fname]
             dst = mutate(src)
@@ -577,10 +684,16 @@ def poison_test():
             print('  [FAIL] %s → 期望组 %s 未报错%s'
                   % (title, expect,
                      ('，但其他组报了: %s' % [(r[1], r[2][:40]) for r in others]) if others else '，全绿'))
-    print('\n捕获 %d/%d，跳过 %d' % (caught, total, skipped))
+    print('\n捕获 %d/%d，跳过 %d（跳过=毒丸锚点未命中，不计入分母）' % (caught, total, skipped))
     # 捕获率 100% 的定义：全部毒丸都有着落，未 SKIP 的全部被捕获
-    trusted = (caught + skipped == total) and (caught == total - skipped)
-    print('结论: %s' % ('检查器可信（捕获率 100%）' if trusted else '不可信'))
+    # caught > 0 是必要的下限：全 SKIP 时前两式恒等，会判"可信"并 exit 0 —— 与
+    # "跳过不算覆盖"自相矛盾，等于给一台没验过任何分支的检查器盖章。
+    trusted = (caught + skipped == total) and (caught == total - skipped) and caught > 0
+    if trusted and skipped:
+        print('结论: 已配毒丸的分支全部捕获（%d/%d），另有 %d 颗毒丸跳过（锚点未命中）'
+              % (caught, total - skipped, skipped))
+    else:
+        print('结论: %s' % ('检查器可信（已配毒丸的分支捕获率 100%）' if trusted else '不可信'))
     return 0 if trusted else 1
 
 
@@ -595,7 +708,9 @@ CAS_KEYS = {
 
 def cas_precheck(base, expects):
     """写公共文件前的 CAS 校验：磁盘签名版本 == 会话预期版本才放行。
-    用法：--expect RULE=3.18 STATUS=1.6 DATA=1.45 SKILL=1.0（键可小写）。"""
+    用法：--expect RULE=<ver> STATUS=<ver> DATA=<ver>（键可小写）。项目里另有工作索引时
+    才追加 SKILL=<ver>——索引路径读不到时本校验直接判冲突，而普通巡检对读不到的文件是
+    静默跳过的。"""
     print('=' * 66)
     print('CAS 写前校验  (base=%s)' % base)
     print('=' * 66)
@@ -628,11 +743,19 @@ def cas_precheck(base, expects):
 
 
 def main():
+    # 非 UTF-8 控制台（zh-CN Windows 的 cmd 默认 GBK）会让含 ✅ 的输出直接抛
+    # UnicodeEncodeError、以 traceback 收场。而退出码 1 在文档里的定义是"有 FAIL"，
+    # 用户会把一次崩溃读成巡检结论——这正是本文档最反对的那种"看似失败/看似通过"。
+    try:
+        import sys
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
     ap = argparse.ArgumentParser(description='分层记忆管理体系 · 健康巡检器')
     ap.add_argument('--base', default='.workbuddy/memory', help='记忆目录')
     ap.add_argument('--index', default=None, help='工作线索引文件（启用 G2 反向映射）')
     ap.add_argument('--expect', nargs='*', default=None,
-                    help='CAS 写前校验，如 --expect RULE=3.18 STATUS=1.6 DATA=1.45')
+                    help='CAS 写前校验，如 --expect RULE=<ver> STATUS=<ver> DATA=<ver>')
     ap.add_argument('--poison', action='store_true', help='毒丸自检（内存变异）')
     args = ap.parse_args()
 
@@ -643,7 +766,13 @@ def main():
         print('记忆目录不存在: %s' % args.base)
         return 1
 
-    if args.expect:
+    if args.expect is not None:
+        # 空列表（`--expect` 后面没跟任何 RULE=x.y）会让校验静默降级成一次全量巡检、
+        # 并且返回 0——正好在最需要兜底的路径上不出声、还报成功。直接拒绝。
+        if not args.expect:
+            print('[FAIL] --expect 未带任何 RULE=<ver> 参数 —— 拒绝执行'
+                  '（空参数会让写前校验静默失效，误当成"校验通过"）')
+            return 1
         return cas_precheck(args.base, args.expect)
 
     print('=' * 66)
