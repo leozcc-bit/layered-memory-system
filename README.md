@@ -51,6 +51,7 @@ memory/
 | 并发写防护 | 公共文件（含工作索引）单主窗口核销；写前 CAS 校验磁盘签名=预期版本；I 组检测版本回退 |
 | 多副本同步 | 多份副本改一处要同步整个目录；验收跑 `diff -r` 且必须跑在同步动作之后；脱敏词典必须含目录名与路径 |
 | 毒丸自检 | 往内存副本注入已知假失效，证明检查组不是橡皮图章；**必须全部捕获**才算通过——跳过与未命中都判不可信、退出码 1 |
+| 检查器自检规格 | `--selftest` 至少含一类**判定逻辑**的已知答案断言（口径／正则／版本比较的正反例），且必须包含"该报错的情形"；只有 I/O 就绪断言不算通过。同职能脚本**先盘再写、能收编就不新建** |
 
 ## 快速开始
 
@@ -105,7 +106,9 @@ python scripts/memory_health_check.py --base your-workspace/.workbuddy/memory --
 ├── LICENSE                         # MIT
 ├── .gitattributes                  # 行尾统一为 LF，保证逐字节比对可跨平台复现
 ├── version-archive/                # 历史版本归档，逐版留存便于比对与回退（脱敏口径见下）
-│   ├── v1.4.0/                     # SKILL / README / LICENSE / scripts / templates / 配套 skill
+│   ├── v1.5.1/                     # SKILL / README / LICENSE / scripts / templates / 配套 skill
+│   ├── v1.5.0/
+│   ├── v1.4.0/
 │   └── v1.3.0/
 ├── scripts/
 │   └── memory_health_check.py      # 十组检查（含 J 组 ID 唯一性）+ 写前 CAS 校验 + 内置毒丸自检（纯函数设计，内存变异不碰磁盘）
